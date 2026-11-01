@@ -3,7 +3,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const repo = path.resolve(root, '../..');
-const target = path.join(repo, 'app/src/main/assets/lost-found');
+const assets = path.join(repo, 'app/src/main/assets');
+if (!existsSync(assets)) {
+  console.log('Standalone web build is ready in dist/. Android asset packaging is skipped.');
+  process.exit(0);
+}
+const target = path.join(assets, 'lost-found');
 if (!target.startsWith(path.join(repo, 'app/src/main/assets') + path.sep) || path.basename(target) !== 'lost-found') throw new Error('Invalid bundle target');
 if (existsSync(target)) rmSync(target, {recursive:true});
 mkdirSync(target,{recursive:true}); cpSync(path.join(root,'dist'),target,{recursive:true});
