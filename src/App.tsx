@@ -1,4 +1,4 @@
-import { isOnline, isConnected, onlineDetail, getNotices, markNoticeRead } from './online';
+import { isOnline, isConnected, onlineDetail, getNotices, markNoticeRead, blockedAuthors, blockAuthor, reportPost } from './online';
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
 import { ArrowLeftIcon, MagnifyingGlassIcon, ChevronDownIcon, ChevronRightIcon, PlusIcon, Cross2Icon, CheckIcon, ImageIcon, Pencil1Icon, TrashIcon, CopyIcon, CheckCircledIcon, SewingPinFilledIcon } from '@radix-ui/react-icons';
 import { BottomSheet, KeyboardInput, KeyboardTextarea, MobileScroll, useKeyboard, useKeyboardInsets, useMobileDevice } from './mobile';
@@ -11,7 +11,7 @@ import '@fontsource/noto-sans-sc/700.css';
 declare global { interface Window { CampusLostFound?: { back: () => boolean; ready: boolean; refresh: () => Promise<void> }; } }
 type Draft = Pick<Item, 'kind' | 'title' | 'campus' | 'location' | 'date' | 'image' | 'description' | 'contact'>;
 type Page = 'home' | 'mine' | 'detail' | 'publish' | 'notifications';
-type Sheet = 'campus' | 'form-campus' | 'contact' | 'delete' | 'discard' | 'photo' | 'full-image' | null;
+type Sheet = 'campus' | 'form-campus' | 'contact' | 'delete' | 'discard' | 'photo' | 'full-image' | 'more' | 'block' | 'report' | null;
 const campuses = ['成都校区', '雅安校区', '都江堰校区'];
 const boot = new URLSearchParams(location.search);
 const bootKind: Kind = boot.get('start') === 'publish-lost' ? 'lost' : 'found';
@@ -47,6 +47,8 @@ export default function App() {
   const [processingPhoto,setProcessingPhoto]=useState(false);
   const [connected,setConnected]=useState(true);
   const [notices,setNotices]=useState<ReviewNotice[]>([]);
+  const [blocked,setBlocked]=useState<Set<string>>(blockedAuthors);
+  const [reportReason,setReportReason]=useState('');
   const syncing=useRef(false),seenNotices=useRef(new Set<string>());
   const publishId=useRef(`mine-${crypto.randomUUID()}`);
   const saving = useRef(false);
@@ -75,7 +77,7 @@ export default function App() {
   async function sync(manual=false){
     if(!ready||!isOnline()||syncing.current||document.hidden)return;
     syncing.current=true;
-    try{setItems(await loadItems([]));const next=getNotices();setNotices(next);setConnected(true);
+    try{setItems(await loadItems([]));setBlocked(blockedAuthors());const next=getNotices();setNotices(next);setConnected(true);
       if(next.some(n=>!n.read_at&&!seenNotices.current.has(n.id)))setToast('收到新的处理通知，请查看结果和原因');
       next.forEach(n=>seenNotices.current.add(n.id));if(manual)setToast('已同步最新状态');
     }catch(error){setConnected(false);setItems(rows=>rows.filter(r=>r.mine));if(manual)setToast((error as Error).message);}
@@ -131,6 +133,18 @@ export default function App() {
   const remove = async () => { if (!selected?.mine || !await persist({type:'delete',id:selected.id})) return; setLastDeleted(isOnline()?null:selected); go('mine'); tell('已删除这条信息'); };
   const restore = async () => { if (lastDeleted && await persist({type:'restore',item:lastDeleted})) { setLastDeleted(null); setToast(''); } };
   const complete = async () => { if (selected && await persist({type:'complete',id:selected.id})) tell(selected.done ? '已重新开放' : '已标记为完成'); };
+  const blockSelected = () => {
+    if (!selected?.ownerId || selected.mine) return;
+    try { blockAuthor(selected.ownerId, selected.ownerName || '校园用户'); setBlocked(blockedAuthors()); go('home'); tell('已屏蔽发布者'); }
+    catch (cause) { tell((cause as Error).message); }
+  };
+  const reportSelected = async () => {
+    if (!selected || !reportReason.trim() || busy) return;
+    setBusy(true);
+    try { await new Promise(resolve=>setTimeout(resolve,0)); reportPost(selected.id,reportReason.trim()); setReportReason(''); setSheet(null); tell('举报已提交'); }
+    catch (cause) { tell((cause as Error).message); }
+    finally { setBusy(false); }
+  };
   const copyContact = async () => {
     if (!selected) return;
     let copied = false;
@@ -142,7 +156,8 @@ export default function App() {
     tell(copied ? '联系方式已复制' : '请长按联系方式手动复制');
   };
   const keywords = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
-  const filtered = items.filter(i => (!isOnline()||(connected&&i.status==='PUBLISHED')) && !i.done && i.kind === kind && (campus === '全部校区' || i.campus === campus) && keywords.every(word => `${i.title}${i.location}${i.campus}${i.description}`.toLocaleLowerCase().includes(word)));
+  const filtered = items.filter(i => (!i.ownerId || !blocked.has(i.ownerId)) && (!isOnline()||(connected&&i.status==='PUBLISHED')) && !i.done && i.kind === kind && (campus === '全部校区' || i.campus === campus) && keywords.every(word => `${i.title}${i.location}${i.campus}${i.description}`.toLocaleLowerCase().includes(word)));
+  const selectedBlocked = !!selected?.ownerId && blocked.has(selected.ownerId) && !selected.mine;
   const myItems = items.filter(i => i.mine && (mineFilter === '全部' || (mineFilter==='进行中'?!i.done:mineFilter==='已完成'?i.done:reviewLabels[i.status||'']===mineFilter)));
   const heading = page === 'home' ? '失物招领' : page === 'mine' ? '我的发布' : page === 'notifications'?'处理通知':page === 'detail' ? (selected?.kind === 'lost' ? '寻物详情' : '招领详情') : editId ? '编辑信息' : '发布信息';
   const row = (item: Item) => <button key={item.id} className="lf-item" data-id={item.id} onClick={() => openDetail(item)} aria-label={`查看${item.title}`}>
@@ -151,7 +166,7 @@ export default function App() {
   </button>;
 
   return <div className="lf-app" style={{ '--lf-safe-top': `${device.geometry.safeArea.top}px` } as CSSProperties}>
-    <header className="lf-header"><button className="lf-back" aria-label="返回" onClick={headerBack}><ArrowLeftIcon /></button><h1>{heading}</h1>{page === 'home' && ready ? <button className="lf-text-button" onClick={() => go('mine')}>我的</button> : <span className="lf-header-spacer" />}</header>
+    <header className="lf-header"><button className="lf-back" aria-label="返回" onClick={headerBack}><ArrowLeftIcon /></button><h1>{heading}</h1>{page === 'home' && ready ? <button className="lf-text-button" onClick={() => go('mine')}>我的</button> : page === 'detail' && selected && !selected.mine && !selectedBlocked && isOnline() ? <button className="lf-text-button" aria-label="更多操作" onClick={()=>setSheet('more')}>•••</button> : <span className="lf-header-spacer" />}</header>
     {!ready && <div className="native-loading" role="status">{loadError || '正在读取信息…'}{loadError && <button className="lf-primary" onClick={load}>重新读取</button>}</div>}
     {ready && <>
     {isOnline()&&<div className="lf-sync"><span>{connected?'审核通过后公开展示':'连接已中断，请重新连接后同步'}</span><div><button onClick={()=>{go('notifications');void sync();}}>处理通知{notices.some(n=>!n.read_at)?` (${notices.filter(n=>!n.read_at).length})`:''}</button><button onClick={()=>void sync(true)}>刷新</button></div></div>}
@@ -170,30 +185,34 @@ export default function App() {
       <div className="lf-mine-tabs" role="tablist" aria-label="发布状态">{(isOnline()?['全部','待审核','已发布','违规','进行中','已完成']:['全部','进行中','已完成']).map(filter => <button key={filter} role="tab" aria-selected={mineFilter === filter} className={mineFilter === filter ? 'active' : ''} onClick={() => setMineFilter(filter)}>{filter}</button>)}</div>
       <MobileScroll key={`mine-${mineFilter}`} className="lf-scroll"><main className="lf-list lf-mine-list">{myItems.length ? <>{myItems.map(row)}<p className="lf-end">没有更多了</p></> : <div className="lf-empty"><ImageIcon /><h2>{mineFilter === '已完成' ? '还没有完成的记录' : '还没有发布信息'}</h2><p>寻回遗失物品，也帮好心找到回应</p><button className="lf-primary" onClick={() => openPublish()}>发布一条信息</button></div>}</main></MobileScroll>
     </>}
-    {page === 'detail' && selected && <>
+    {page === 'detail' && selected && !selectedBlocked && <>
       <MobileScroll key={selected.id} className="lf-scroll"><main className="lf-detail">
         {selected.mine&&<div className="lf-review-detail"><ReviewBadge item={selected}/><span>{selected.status==='PUBLISHED'&&!selected.done?'公开列表展示中':'公开列表不展示'}</span><ReviewReason item={selected}/></div>}
         {selected.image&&<button className="lf-detail-photo" onClick={()=>setSheet('full-image')} aria-label="查看完整物品照片"><img className="lf-detail-image" src={selected.image} alt={selected.title} draggable={false}/><span>点击查看完整大图</span></button>}
         <div className="lf-detail-heading"><span className="lf-label">{selected.kind === 'found' ? '招领' : '寻物'}{' · '+progress(selected)}</span><h2>{selected.title}</h2><p className="lf-location"><SewingPinFilledIcon />{selected.campus} · {selected.location}</p><p className="lf-detail-date">{selected.date} · {selected.kind === 'found' ? '拾获' : '遗失'}</p></div>
-        <section className="lf-description"><h3>物品描述</h3><p>{selected.description || '发布人暂未补充描述，可联系了解物品特征。'}</p></section><p className="lf-gentle-note">{selected.kind === 'found' ? '领取时请核对物品特征，确认后当面交还。' : '如有相关线索，可以通过联系方式联系发布人。'}</p>{!isOnline() && !selected.mine && <p className="lf-demo-note">示例信息，用于体验页面交互</p>}
+        <section className="lf-description"><h3>物品描述</h3><p>{selected.description || '发布人暂未补充描述，可联系了解物品特征。'}</p></section>{!isOnline() && !selected.mine && <p className="lf-demo-note">示例信息，用于体验页面交互</p>}
       </main></MobileScroll>
       <div className="lf-dock" style={{ bottom: bottomInset }}>{selected.mine ? <><div className="lf-management"><button disabled={busy} onClick={() => openPublish(selected)}><Pencil1Icon />编辑</button><button disabled={busy} className="lf-delete" onClick={() => setSheet('delete')}><TrashIcon />删除</button></div><button disabled={busy||(isOnline()&&selected.status!=='PUBLISHED')} className="lf-primary" onClick={complete}><CheckCircledIcon />{selected.done?'重新开放':selected.kind==='lost'?'标记已找回':'标记已归还'}</button></> : <button className="lf-primary" onClick={() => setSheet('contact')}>联系发布人</button>}</div>
     </>}
     {page === 'detail' && !selected && <div className="lf-empty"><h2>这条信息不存在或已被删除</h2><button className="lf-primary" onClick={() => go('home')}>返回列表</button></div>}
+    {page === 'detail' && selectedBlocked && <div className="lf-empty"><h2>已屏蔽该用户</h2><button className="lf-secondary" onClick={() => go('home')}>返回列表</button></div>}
     {page === 'publish' && <>
       <MobileScroll key={`publish-${editId || 'new'}`} className="lf-scroll"><form id="lf-publish-form" className="lf-form" onSubmit={publish} noValidate>
         <div className="lf-segment" role="tablist" aria-label="发布类型"><button type="button" role="tab" aria-selected={draft.kind === 'lost'} className={draft.kind === 'lost' ? 'active' : ''} onClick={() => changeDraft('kind', 'lost')}>我丢了东西</button><button type="button" role="tab" aria-selected={draft.kind === 'found'} className={draft.kind === 'found' ? 'active' : ''} onClick={() => changeDraft('kind', 'found')}>我捡到东西</button></div>
-        <div className="lf-photo-row"><button type="button" className="lf-photo-picker" onClick={() => setSheet('photo')} aria-label={draft.image ? '更换物品照片' : '添加物品照片'}>{draft.image ? <img src={draft.image} alt="已选物品照片" /> : <><PlusIcon /><span>添加照片</span></>}</button><div><p>物品照片 <span>选填</span></p><small>清晰的照片，更容易找到失主<br />请遮住证件上的个人信息</small>{draft.image && <button type="button" className="lf-remove-photo" onClick={() => changeDraft('image', '')}>移除照片</button>}</div></div>
+        <div className="lf-photo-row"><button type="button" className="lf-photo-picker" onClick={() => setSheet('photo')} aria-label={draft.image ? '更换物品照片' : '添加物品照片'}>{draft.image ? <img src={draft.image} alt="已选物品照片" /> : <><PlusIcon /><span>添加照片</span></>}</button><div><p>物品照片 <span>选填</span></p>{draft.image && <button type="button" className="lf-remove-photo" onClick={() => changeDraft('image', '')}>移除照片</button>}</div></div>
         <label className="lf-field"><span>物品名称 <b>*</b></span><KeyboardInput aria-label="物品名称" value={draft.title} onChange={e => changeDraft('title', e.target.value)} maxLength={30} placeholder={draft.kind === 'found' ? '例如：捡到一张校园卡' : '例如：寻找一串钥匙'} /></label>
         <div className="lf-field"><span>所在校区 <b>*</b></span><button type="button" className="lf-select" aria-label="选择所在校区" onClick={() => setSheet('form-campus')}>{draft.campus}<ChevronRightIcon /></button></div>
         <label className="lf-field"><span>{draft.kind === 'found' ? '拾获地点' : '遗失地点'} <b>*</b></span><KeyboardInput aria-label="具体地点" value={draft.location} onChange={e => changeDraft('location', e.target.value)} maxLength={40} placeholder="例如：图书馆一楼" /></label>
         <label className="lf-field"><span>{draft.kind === 'found' ? '拾获日期' : '遗失日期'} <b>*</b></span><KeyboardInput aria-label="物品日期" value={draft.date} onChange={e => changeDraft('date', e.target.value)} maxLength={10} placeholder="2026-10-16" /></label>
         <label className="lf-field"><span>补充描述 <em>选填</em></span><KeyboardTextarea aria-label="补充描述" value={draft.description} onChange={e => changeDraft('description', e.target.value)} maxLength={300} placeholder="物品特征、颜色，或其他有用的线索…" rows={3} /></label>
-        <label className="lf-field"><span>联系方式 <b>*</b></span><KeyboardInput aria-label="联系方式" value={draft.contact} onChange={e => changeDraft('contact', e.target.value)} maxLength={60} placeholder="微信号或联系电话" /><small>仅在物品详情中展示</small></label><p className="lf-demo-note">{isOnline() ? '提交或修改后需管理员审核，通过后对其他同学展示。联系方式仅在详情展示。' : '信息保存在本机，暂未向其他设备同步'}</p>
+        <label className="lf-field"><span>联系方式 <b>*</b></span><KeyboardInput aria-label="联系方式" value={draft.contact} onChange={e => changeDraft('contact', e.target.value)} maxLength={60} placeholder="微信号或联系电话" /><small>仅在物品详情中展示</small></label>{!isOnline() && <p className="lf-demo-note">信息保存在本机，暂未向其他设备同步</p>}
       </form></MobileScroll><div className="lf-dock" style={{ bottom: bottomInset }}>{error && <p role="alert" className="lf-error">{error}</p>}<button disabled={busy||processingPhoto} type="submit" form="lf-publish-form" className="lf-primary">{busy?'正在提交…':processingPhoto?'正在处理图片…':isOnline()?(editId?'保存并重新审核':'提交审核'):(editId?'保存修改':'确认发布')}</button></div>
     </>}
     <BottomSheet open={sheet === 'campus' || sheet === 'form-campus'} onOpenChange={open => !open && setSheet(null)} title="选择校区" description="查看所在校区的失物信息" snap={0.48}><div className="lf-sheet-options">{(sheet === 'campus' ? ['全部校区', ...campuses] : campuses).map(c => <button key={c} onClick={() => { if (sheet === 'campus') setCampus(c); else changeDraft('campus', c); setSheet(null); }}><span>{c}</span>{(sheet === 'campus' ? campus : draft.campus) === c && <CheckIcon />}</button>)}</div></BottomSheet>
     <BottomSheet open={sheet === 'contact'} onOpenChange={open => !open && setSheet(null)} title="联系发布人" description={isOnline() || selected?.mine ? '通过以下方式联系' : '以下为示例联系方式，不会发出消息'} snap={0.4}><div className="lf-contact-card"><span>微信号 / 电话</span><strong>{selected?.contact}</strong></div><button className="lf-primary" onClick={copyContact}><CopyIcon />复制联系方式</button></BottomSheet>
+    <BottomSheet open={sheet === 'more'} onOpenChange={open=>!open&&setSheet(null)} title="更多操作"><div className="lf-sheet-actions"><button className="lf-secondary" onClick={()=>{setReportReason('');setSheet('report');}}>举报内容</button>{selected?.ownerId&&<button className="lf-secondary" onClick={()=>setSheet('block')}>屏蔽发布者</button>}</div></BottomSheet>
+    <BottomSheet open={sheet === 'block'} onOpenChange={open=>!open&&setSheet(null)} title="屏蔽发布者？" description="将在这台设备隐藏该用户在二手好物和失物招领中的发布，可在隐私与合规中解除。"><div className="lf-sheet-actions"><button className="lf-danger" onClick={blockSelected}>屏蔽</button><button className="lf-secondary" onClick={()=>setSheet(null)}>取消</button></div></BottomSheet>
+    <BottomSheet open={sheet === 'report'} onOpenChange={open=>!open&&!busy&&setSheet(null)} title="举报内容"><label className="lf-field"><span>举报原因</span><KeyboardTextarea aria-label="举报原因" value={reportReason} onChange={e=>setReportReason(e.target.value)} maxLength={300} placeholder="请说明需要处理的内容" rows={4}/></label><button className="lf-primary" disabled={busy||!reportReason.trim()} onClick={()=>void reportSelected()}>{busy?'提交中…':'提交举报'}</button></BottomSheet>
     <BottomSheet open={sheet === 'delete'} onOpenChange={open => !open && !busy && setSheet(null)} title="删除这条信息？" description={isOnline()?"删除后将从后台、公开列表和我的发布中永久移除，不能撤销。":"删除后将从列表中移除，可在提示中撤销。"} snap={0.36}><div className="lf-sheet-actions"><button disabled={busy} className="lf-danger" onClick={remove}>确认删除</button><button disabled={busy} className="lf-secondary" onClick={() => setSheet(null)}>保留信息</button></div></BottomSheet>
     <BottomSheet open={sheet === 'discard'} onOpenChange={open => !open && setSheet(null)} title="放弃这次编辑？" description="尚未保存的内容将不会保留。" snap={0.36}><div className="lf-sheet-actions"><button className="lf-primary" onClick={() => setSheet(null)}>继续编辑</button><button className="lf-secondary" onClick={() => go(formReturn)}>放弃编辑</button></div></BottomSheet>
     <BottomSheet open={sheet === 'photo'} onOpenChange={open => !open && setSheet(null)} title="添加物品照片" description="选择真实物品照片，请遮住证件上的个人信息" snap={0.57}><button className="lf-primary" onClick={() => upload.current?.click()}><ImageIcon />从本机选择照片</button></BottomSheet>

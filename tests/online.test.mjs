@@ -26,3 +26,13 @@ test('submission retries keep the same client id and resubmit for review',async(
 test('deletion clears records and notices after reload and restore is rejected',async()=>{const {api,state}=await setup();state.notices=[{id:'note',post_id:'one',read_at:null}];await api.loadOnline();assert.deepEqual(await api.commitOnline({type:'delete',id:'one'}),[]);assert.deepEqual(await api.loadOnline(),[]);assert.deepEqual(api.getNotices(),[]);await assert.rejects(api.commitOnline({type:'restore',item:fixture()}),/不能恢复/);});
 test('completion and notification read state are saved to the API',async()=>{const {api,state}=await setup();state.rows=[fixture('PUBLISHED')];state.notices=[{id:'note',post_id:'one',read_at:null}];await api.loadOnline();assert.equal((await api.commitOnline({type:'complete',id:'one'}))[0].done,true);assert.ok((await api.markNoticeRead('note'))[0].read_at);await api.loadOnline();assert.ok(api.getNotices()[0].read_at);});
 test('refresh replaces stale published data and reports connection failure',async()=>{const {api,state}=await setup();state.rows=[fixture('PUBLISHED')];await api.loadOnline();state.rows=[];assert.deepEqual(await api.loadOnline(),[]);state.fail=true;await assert.rejects(api.loadOnline());assert.equal(api.isConnected(),false);});
+test('community block and report requests use the native account boundary',async()=>{
+  const {api}=await setup();const blocked=[];const reports=[];
+  window.ChuannongContent.blockedUsers=()=>JSON.stringify(blocked);
+  window.ChuannongContent.blockUser=(id,name)=>{blocked.push({id,name});return JSON.stringify({ok:true});};
+  window.ChuannongContent.reportCommunity=(id,reason)=>{reports.push([id,reason]);return JSON.stringify({ok:true});};
+  api.blockAuthor('author-a','同学');assert.equal(api.blockedAuthors().has('author-a'),true);
+  api.reportPost('post-a','具体原因');assert.deepEqual(reports,[['post-a','具体原因']]);
+  window.ChuannongContent.reportCommunity=()=>JSON.stringify({ok:false,error:{message:'暂不可用'}});
+  assert.throws(()=>api.reportPost('post-a','具体原因'),/暂不可用/);
+});

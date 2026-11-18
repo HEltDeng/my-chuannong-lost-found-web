@@ -1,7 +1,19 @@
 import type { Item, ReviewNotice } from './types';
 import type { Action } from './storage';
 
-declare global { interface Window { ChuannongContent?: { request(method: string,path: string,body: string): string } } }
+declare global { interface Window { ChuannongContent?: { request(method: string,path: string,body: string): string; blockedUsers(): string; blockUser(author: string,name: string): string; reportCommunity(id: string,reason: string): string } } }
+export function blockedAuthors(): Set<string> {
+  try { return new Set((JSON.parse(window.ChuannongContent?.blockedUsers() || '[]') as {id:string}[]).map(item => item.id)); }
+  catch { return new Set(); }
+}
+export function blockAuthor(id:string,name:string) {
+  const response=JSON.parse(window.ChuannongContent?.blockUser(id,name) || '{"ok":false}');
+  if(!response.ok)throw Error(response.error?.message || '屏蔽失败，请重试');
+}
+export function reportPost(id:string,reason:string) {
+  const response=JSON.parse(window.ChuannongContent?.reportCommunity(id,reason) || '{"ok":false}');
+  if(!response.ok)throw Error(response.error?.message || '举报提交失败，请重试');
+}
 let online = false, connected = false;
 let records: Item[] = [], notices:ReviewNotice[]=[];
 let work:Promise<unknown>=Promise.resolve();
